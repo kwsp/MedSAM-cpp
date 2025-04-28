@@ -10,7 +10,11 @@ set_target_properties(${EXE_NAME} PROPERTIES
 )
 
 find_package(fmt CONFIG REQUIRED)
+find_package(ggml CONFIG REQUIRED)
+find_package(OpenCV CONFIG REQUIRED)
 
 target_link_libraries(${EXE_NAME} PRIVATE
   fmt::fmt
+  ggml::all
+  opencv_world
 )

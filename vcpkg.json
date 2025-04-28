@@ -1,6 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
-  "name": "cpp-template",
+  "name": "medsam-cpp",
   "version": "0.1",
-  "dependencies": ["fmt"]
+  "dependencies": [
+    "fmt",
+    "ggml",
+    {
+      "name": "opencv",
+      "features": ["highgui", "world"]
+    }
+  ]
 }

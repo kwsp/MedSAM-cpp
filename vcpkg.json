@@ -4,7 +4,6 @@
   "version": "0.1",
   "dependencies": [
     "fmt",
-    "ggml",
     {
       "name": "opencv",
       "features": ["highgui", "world"]

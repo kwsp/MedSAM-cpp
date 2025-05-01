@@ -12,4 +12,7 @@ project(CppTemplate
 
 enable_testing()
 
+set(GGML_METAL off)
+add_subdirectory(ggml)
+
 add_subdirectory(src)

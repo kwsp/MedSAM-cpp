@@ -1,3 +1,5 @@
+#include <opencv2/core.hpp>
+#include <opencv2/core/ovx.hpp>
 #include <opencv2/imgcodecs.hpp>
 #define _USE_MATH_DEFINES // for M_PI
 #define _CRT_SECURE_NO_DEPRECATE // Disables ridiculous "unsafe" warnigns on Windows
@@ -424,71 +426,26 @@ void sam_image_from_cv(const cv::Mat & mat, sam_image_u8 & img) {
 // normalize: x = (x - mean) / std
 //     mean = [123.675, 116.28, 103.53]
 //     std  = [58.395, 57.12, 57.375]
-//     TODO: why are these hardcoded !?
 // pad to 1024x1024
-// TODO: for some reason, this is not numerically identical to pytorch's interpolation
-bool sam_image_preprocess(const sam_image_u8 & img, sam_image_f32 & res) {
-    const int nx = img.nx;
-    const int ny = img.ny;
+cv::Mat sam_image_preprocess(cv::Mat img) {
+    // Rescale
+    img.convertTo(img, CV_32F);
+    cv::Scalar pixel_mean { 123.675f, 116.280f, 103.530f };
+    cv::Scalar pixel_std {  58.395f,  57.120f,  57.375f };
+    cv::subtract(img, pixel_mean, img);
+    cv::divide(img, pixel_std, img);
 
-    const int nx2 = 1024;
-    const int ny2 = 1024;
+    // Size up
+    const auto scale = 1024.0F / std::max(img.cols, img.rows);
+    int nx2 = std::round(img.cols * scale);
+    int ny2 = std::round(img.rows * scale);
 
-    res.nx = nx2;
-    res.ny = ny2;
-    res.data.resize(3*nx2*ny2);
-
-    const float scale = std::max(nx, ny) / 1024.0f;
-
-    fprintf(stderr, "%s: scale = %f\n", __func__, scale);
-
-    const int nx3 = int(nx/scale + 0.5f);
-    const int ny3 = int(ny/scale + 0.5f);
-
-    const float m3[3] = { 123.675f, 116.280f, 103.530f };
-    const float s3[3] = {  58.395f,  57.120f,  57.375f };
-
-    for (int y = 0; y < ny3; y++) {
-        for (int x = 0; x < nx3; x++) {
-            for (int c = 0; c < 3; c++) {
-                // linear interpolation
-                const float sx = (x + 0.5f)*scale - 0.5f;
-                const float sy = (y + 0.5f)*scale - 0.5f;
-
-                const int x0 = std::max(0, (int) std::floor(sx));
-                const int y0 = std::max(0, (int) std::floor(sy));
-
-                const int x1 = std::min(x0 + 1, nx - 1);
-                const int y1 = std::min(y0 + 1, ny - 1);
-
-                const float dx = sx - x0;
-                const float dy = sy - y0;
-
-                const int j00 = 3*(y0*nx + x0) + c;
-                const int j01 = 3*(y0*nx + x1) + c;
-                const int j10 = 3*(y1*nx + x0) + c;
-                const int j11 = 3*(y1*nx + x1) + c;
-
-                const float v00 = img.data[j00];
-                const float v01 = img.data[j01];
-                const float v10 = img.data[j10];
-                const float v11 = img.data[j11];
-
-                const float v0 = v00*(1.0f - dx) + v01*dx;
-                const float v1 = v10*(1.0f - dx) + v11*dx;
-
-                const float v = v0*(1.0f - dy) + v1*dy;
-
-                const uint8_t v2 = std::min(std::max(std::round(v), 0.0f), 255.0f);
-
-                const int i = 3*(y*nx3 + x) + c;
-
-                res.data[i] = (float(v2) - m3[c]) / s3[c];
-            }
-        }
-    }
-
-    return true;
+    cv::Mat resized;
+    cv::resize(img, resized, {nx2, ny2});
+    int bottom = 1024 - ny2;
+    int right = 1024 - nx2;
+    cv::copyMakeBorder(resized, resized, 0, bottom, 0, right, cv::BORDER_CONSTANT);
+    return resized;
 }
 
 // load the model's weights from a file
@@ -1177,7 +1134,8 @@ struct ggml_tensor* sam_layer_norm_2d(
 struct ggml_cgraph  * sam_encode_image(
             const sam_model & model,
                   sam_state & state,
-        const sam_image_f32 & img) {
+        // const sam_image_f32 & img) {
+        const cv::Mat & img) {
 
     const auto & hparams = model.hparams;
     const auto & enc     = model.enc_img;
@@ -1377,19 +1335,24 @@ struct ggml_cgraph  * sam_encode_image(
         struct ggml_tensor * inp = ggml_graph_get_tensor(gf, "inp");
         float * data = (float *) ggml_get_data(inp);
 
-        const int nx = img.nx;
-        const int ny = img.ny;
+        // const int nx = img.nx;
+        // const int ny = img.ny;
+        const int nx = img.cols;
+        const int ny = img.rows;
         const int n  = nx*ny;
 
         GGML_ASSERT(nx == n_img_size && ny == n_img_size);
 
-        for (int k = 0; k < 3; k++) {
-            for (int y = 0; y < ny; y++) {
-                for (int x = 0; x < nx; x++) {
-                    data[k*n + y*nx + x] = img.data[3*(y*nx + x) + k];
-                }
-            }
-        }
+        const auto blob = cv::dnn::blobFromImage(img);
+        std::copy(blob.begin<float>(),blob.end<float>(), data);
+
+        // for (int k = 0; k < 3; k++) {
+        //     for (int y = 0; y < ny; y++) {
+        //         for (int x = 0; x < nx; x++) {
+        //             data[k*n + y*nx + x] = img.data[3*(y*nx + x) + k];
+        //         }
+        //     }
+        // }
     }
 
     return gf;
@@ -1816,11 +1779,11 @@ bool sam_decode_mask(
     return true;
 }
 
-bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state & state, const std::string & fname) {
-    if (state.low_res_masks->ne[2] == 0) return true;
+std::vector<cv::Mat> sam_get_masks(const sam_hparams& hparams, int nx, int ny, const sam_state & state) {
+    if (state.low_res_masks->ne[2] == 0) return {};
     if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
         printf("Error: number of masks (%d) does not match number of iou predictions (%d)\n", (int)state.low_res_masks->ne[2], (int)state.iou_predictions->ne[0]);
-        return false;
+        return {};
     }
 
     const int n_img_size = hparams.n_img_size();
@@ -1837,9 +1800,9 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
     // Remove padding and upscale masks to the original image size.
     // ref: https://github.com/facebookresearch/segment-anything/blob/efeab7296ab579d4a261e554eca80faf6b33924a/segment_anything/modeling/sam.py#L140
 
-    const float preprocess_scale = std::max(nx, ny) / float(n_img_size);
-    const int cropped_nx = int(nx / preprocess_scale + 0.5f);
-    const int cropped_ny = int(ny / preprocess_scale + 0.5f);
+    const float preprocess_scale = float(n_img_size) / std::max(nx, ny) ;
+    const int cropped_nx = int(nx * preprocess_scale + 0.5f);
+    const int cropped_ny = int(ny * preprocess_scale + 0.5f);
 
     const float scale_x_1 = (float)ne0 / (float)n_img_size;
     const float scale_y_1 = (float)ne1 / (float)n_img_size;
@@ -1847,112 +1810,57 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
     const float scale_x_2 = float(cropped_nx) / float(nx);
     const float scale_y_2 = float(cropped_ny) / float(ny);
 
-    const auto iou_data = (float*)state.iou_predictions->data;
+    const auto * const iou_data = (float*)state.iou_predictions->data;
 
+    std::vector<cv::Mat> masks;
     for (int i = 0; i < ne2; ++i) {
         if (iou_threshold > 0.f && iou_data[i] < iou_threshold) {
             printf("Skipping mask %d with iou %f below threshold %f\n", i, iou_data[i], iou_threshold);
             continue; // Filtering masks with iou below the threshold
         }
 
-        std::vector<float> mask_data(n_img_size*n_img_size);
+        cv::Mat low_res_mask(ne0, ne1, CV_32F, (float *)(state.low_res_masks->data) + i*ne0*ne1);
+        // Upsample to 1024x1024
+        cv::Mat mask_data_;
+        cv::resize(low_res_mask, mask_data_, {n_img_size, n_img_size}, cv::INTER_LINEAR);
+
+        // Reverse preprocessing resize and crop
+        cv::Mat restored;
         {
-            const float* data = (float *) state.low_res_masks->data + i*ne0*ne1;
-
-            for (int iy = 0; iy < n_img_size; ++iy) {
-                for (int ix = 0; ix < n_img_size; ++ix) {
-                    const float sx = std::max(scale_x_1*(ix + 0.5f) - 0.5f, 0.0f);
-                    const float sy = std::max(scale_y_1*(iy + 0.5f) - 0.5f, 0.0f);
-
-                    const int x0 = std::max(0, (int)sx);
-                    const int y0 = std::max(0, (int)sy);
-
-                    const int x1 = std::min(x0 + 1, ne0 - 1);
-                    const int y1 = std::min(y0 + 1, ne1 - 1);
-
-                    const float dx = sx - x0;
-                    const float dy = sy - y0;
-
-                    const int j00 = y0*ne0 + x0;
-                    const int j01 = y0*ne0 + x1;
-                    const int j10 = y1*ne0 + x0;
-                    const int j11 = y1*ne0 + x1;
-
-                    const float v00 = data[j00];
-                    const float v01 = data[j01];
-                    const float v10 = data[j10];
-                    const float v11 = data[j11];
-
-                    const float v0 = (1-dx)*v00 + dx*v01;
-                    const float v1 = (1-dx)*v10 + dx*v11;
-
-                    const float v = (1-dy)*v0 + dy*v1;
-
-                    mask_data[iy*n_img_size + ix] = v;
-                }
-            }
+            int nx2 = std::round(nx * preprocess_scale);
+            int ny2 = std::round(ny * preprocess_scale);
+            auto cropped = mask_data_(cv::Rect(0, 0, nx2, ny2));
+            cv::resize(cropped, restored, {nx, ny}, 0, 0, cv::INTER_LINEAR);
         }
 
+
+        // Compute intersection, union, and mask
         int intersections = 0;
         int unions = 0;
-        sam_image_u8 res;
         int min_iy = ny;
         int max_iy = 0;
         int min_ix = nx;
         int max_ix = 0;
-        {
-            const float* data = mask_data.data();
 
-            res.nx = nx;
-            res.ny = ny;
-            res.data.resize(nx*ny);
-
-            for (int iy = 0; iy < ny; ++iy) {
-                for (int ix = 0; ix < nx; ++ix) {
-                    const float sx = std::max(scale_x_2*(ix + 0.5f) - 0.5f, 0.0f);
-                    const float sy = std::max(scale_y_2*(iy + 0.5f) - 0.5f, 0.0f);
-
-                    const int x0 = std::max(0, (int)sx);
-                    const int y0 = std::max(0, (int)sy);
-
-                    const int x1 = std::min(x0 + 1, cropped_nx - 1);
-                    const int y1 = std::min(y0 + 1, cropped_ny - 1);
-
-                    const float dx = sx - x0;
-                    const float dy = sy - y0;
-
-                    const int j00 = y0*n_img_size + x0;
-                    const int j01 = y0*n_img_size + x1;
-                    const int j10 = y1*n_img_size + x0;
-                    const int j11 = y1*n_img_size + x1;
-
-                    const float v00 = data[j00];
-                    const float v01 = data[j01];
-                    const float v10 = data[j10];
-                    const float v11 = data[j11];
-
-                    const float v0 = (1-dx)*v00 + dx*v01;
-                    const float v1 = (1-dx)*v10 + dx*v11;
-
-                    const float v = (1-dy)*v0 + dy*v1;
-
-                    if (v > intersection_threshold) {
-                        intersections++;
-                    }
-                    if (v > union_threshold) {
-                        unions++;
-                    }
-                    if (v > mask_threshold) {
-                        min_iy = std::min(min_iy, iy);
-                        max_iy = std::max(max_iy, iy);
-                        min_ix = std::min(min_ix, ix);
-                        max_ix = std::max(max_ix, ix);
-
-                        res.data[iy*nx + ix] = 255;
-                    }
-                }
+        cv::Mat mask(ny, nx, CV_8UC1);
+        restored.forEach<float>([&](float v, const int * pos){
+            if (v > intersection_threshold) {
+                intersections++;
             }
-        }
+            if (v > union_threshold) {
+                unions++;
+            }
+            if (v > mask_threshold) {
+                const auto ix = pos[0];
+                const auto iy = pos[1];
+
+                min_iy = std::min(min_iy, iy);
+                max_iy = std::max(max_iy, iy);
+                min_ix = std::min(min_ix, ix);
+                max_ix = std::max(max_ix, ix);
+                mask.at<uint8_t>(ix, iy) = 255;
+            }
+        });
 
         const float stability_score = float(intersections) / float(unions);
         if (stability_score_threshold > 0.f && stability_score < stability_score_threshold) {
@@ -1963,13 +1871,10 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
         printf("Mask %d: iou = %f, stability_score = %f, bbox (%d, %d), (%d, %d)\n",
                 i, iou_data[i], stability_score, min_ix, max_ix, min_iy, max_iy);
 
-        std::string filename = fname + std::to_string(i) + ".png";
-        cv::Mat resMat(res.ny, res.nx, CV_8UC1, res.data.data());
-        cv::imwrite(filename, resMat);
+        masks.push_back(mask);
     }
 
-
-    return true;
+    return masks;
 }
 
 
@@ -2218,19 +2123,12 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "%s: seed = %d\n", __func__, params.seed);
 
     // load the image
-    sam_image_u8 img0;
     const auto mat0 = cv::imread(params.fname_inp, cv::IMREAD_COLOR_RGB);
-    sam_image_from_cv(mat0, img0);
-    fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
+    // sam_image_u8 img0;
+    // sam_image_from_cv(mat0, img0);
+    // fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
 
-    // preprocess to f32
-    sam_image_f32 img1;
-    if (!sam_image_preprocess(img0, img1)) {
-        fprintf(stderr, "%s: failed to preprocess image\n", __func__);
-        return 1;
-    }
-    fprintf(stderr, "%s: preprocessed image (%d x %d)\n", __func__, img1.nx, img1.ny);
-
+    const auto mat1 = sam_image_preprocess(mat0);
 
     // load the model
     {
@@ -2269,7 +2167,7 @@ int main(int argc, char ** argv) {
         state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
         state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
-        struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
+        struct ggml_cgraph  * gf = sam_encode_image(model, state, mat1);
         if (!gf) {
             fprintf(stderr, "%s: failed to encode image\n", __func__);
             return 1;
@@ -2302,7 +2200,7 @@ int main(int argc, char ** argv) {
             break;
         }
 
-        struct ggml_cgraph * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, params.prompt);
+        struct ggml_cgraph * gf = sam_build_fast_graph(model, state, mat0.cols, mat0.rows, params.prompt);
         if (!gf) {
             fprintf(stderr, "%s: failed to build fast graph\n", __func__);
             return 1;
@@ -2316,9 +2214,10 @@ int main(int argc, char ** argv) {
         state.allocr = NULL;
     }
 
-    if (!sam_write_masks(model.hparams, img0.nx, img0.ny, state, params.fname_out)) {
-        fprintf(stderr, "%s: failed to write masks\n", __func__);
-        return 1;
+    const auto masks = sam_get_masks(model.hparams, mat0.cols, mat0.rows, state);
+    for (int i=0;i<masks.size(); ++i) {
+        std::string filename = params.fname_out + std::to_string(i) + ".png";
+        cv::imwrite(filename, masks[i]);
     }
 
     // report timing

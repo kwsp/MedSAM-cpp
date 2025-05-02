@@ -1,6 +1,7 @@
 set(EXE_NAME main)
 
 add_executable(${EXE_NAME}
+  main.cpp
   sam.cpp
 )
 

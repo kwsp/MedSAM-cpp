@@ -2467,6 +2467,31 @@ struct sam_predictor {
     }
   }
 
+  void encode_image(const cv::Mat & mat1, int n_threads) {
+    // Encode image
+    {
+      state.buf_compute_img_enc.resize(ggml_tensor_overhead() *
+                                           GGML_DEFAULT_GRAPH_SIZE +
+                                       ggml_graph_overhead());
+      state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+
+      struct ggml_cgraph *gf = sam_encode_image(model, state, mat1);
+      if (!gf) {
+ char       buf [128];
+        snprintf(buf, 128, "%s: failed to encode image\n", __func__);
+        throw std::runtime_error(buf);
+      }
+
+      ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
+
+      // print_t_f32("embd_img", state.embd_img);
+
+      ggml_gallocr_free(state.allocr);
+      state.allocr = nullptr;
+      state.work_buffer.clear();
+    }
+  }
+
   sam_model model;
   sam_state state;
 };
@@ -2488,38 +2513,14 @@ int main(int argc, char **argv) {
 
   // load the image
   const auto mat0 = cv::imread(params.fname_inp, cv::IMREAD_COLOR_RGB);
-  // sam_image_u8 img0;
-  // sam_image_from_cv(mat0, img0);
-  // fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__,
-  // params.fname_inp.c_str(), img0.nx, img0.ny);
-
   const auto mat1 = sam_image_preprocess(mat0);
 
   sam_predictor predictor(params);
 
-  auto& state = predictor.state;
-  auto& model = predictor.model;
-  // Encode image
-  {
-    state.buf_compute_img_enc.resize(ggml_tensor_overhead() *
-                                         GGML_DEFAULT_GRAPH_SIZE +
-                                     ggml_graph_overhead());
-    state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+  auto &state = predictor.state;
+  auto &model = predictor.model;
 
-    struct ggml_cgraph *gf = sam_encode_image(model, state, mat1);
-    if (!gf) {
-      fprintf(stderr, "%s: failed to encode image\n", __func__);
-      return 1;
-    }
-
-    ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
-
-    // print_t_f32("embd_img", state.embd_img);
-
-    ggml_gallocr_free(state.allocr);
-    state.allocr = nullptr;
-    state.work_buffer.clear();
-  }
+  predictor.encode_image(mat1, params.n_threads);
 
   // Encode prompt and decode mask
   {

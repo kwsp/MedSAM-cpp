@@ -1,9 +1,8 @@
-#include <opencv2/core.hpp>
-#include <opencv2/core/ovx.hpp>
-#include <opencv2/imgcodecs.hpp>
 #define _USE_MATH_DEFINES // for M_PI
 #define _CRT_SECURE_NO_DEPRECATE // Disables ridiculous "unsafe" warnigns on Windows
 
+#include <atomic>
+#include <opencv2/core.hpp>
 #include <opencv2/opencv.hpp>
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -1835,14 +1834,14 @@ std::vector<cv::Mat> sam_get_masks(const sam_hparams& hparams, int nx, int ny, c
 
 
         // Compute intersection, union, and mask
-        int intersections = 0;
-        int unions = 0;
+        std::atomic<int> intersections = 0;
+        std::atomic<int> unions = 0;
         int min_iy = ny;
         int max_iy = 0;
         int min_ix = nx;
         int max_ix = 0;
 
-        cv::Mat mask(ny, nx, CV_8UC1);
+        cv::Mat mask = cv::Mat::zeros(ny, nx, CV_8UC1);
         restored.forEach<float>([&](float v, const int * pos){
             if (v > intersection_threshold) {
                 intersections++;
@@ -1862,14 +1861,14 @@ std::vector<cv::Mat> sam_get_masks(const sam_hparams& hparams, int nx, int ny, c
             }
         });
 
-        const float stability_score = float(intersections) / float(unions);
+        const float stability_score = float(intersections.load()) / float(unions.load());
         if (stability_score_threshold > 0.f && stability_score < stability_score_threshold) {
             printf("Skipping mask %d with stability score %f below threshold %f\n", i, stability_score, stability_score_threshold);
             continue; // Filtering masks with stability score below the threshold
         }
 
-        printf("Mask %d: iou = %f, stability_score = %f, bbox (%d, %d), (%d, %d)\n",
-                i, iou_data[i], stability_score, min_ix, max_ix, min_iy, max_iy);
+        printf("Mask %d: iou = %f, stability_score = %f, intersections = %d, unions = %d, bbox (%d, %d), (%d, %d)\n",
+                i, iou_data[i], stability_score, intersections.load(), unions.load(), min_ix, max_ix, min_iy, max_iy);
 
         masks.push_back(mask);
     }

@@ -1,5 +1,7 @@
 # MedSAM-cpp
 
+Based on https://github.com/ggml-org/ggml/tree/master/examples/sam with MedSAM specific preprocessing and OpenCV integration.
+
 ## Installation
 
 Requires CMake, ggml (git submodule), and OpenCV (installed by vcpkg).

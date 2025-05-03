@@ -278,6 +278,7 @@ struct sam_params {
   float eps_decoder_transformer = 1e-5f;
 
   sam_prompt prompt;
+  bool multimask_output = true;
 };
 
 struct sam_model {
@@ -297,16 +298,21 @@ bool sam_params_parse(int argc, char **argv, sam_params &params);
 bool sam_model_load(const sam_params &params, sam_model &model);
 
 cv::Mat sam_image_preprocess(cv::Mat img);
+cv::Mat medsam_image_preprocess(cv::Mat img);
 
 struct ggml_cgraph *sam_encode_image(const sam_model &model, sam_state &state,
                                      const cv::Mat &img);
 
 struct ggml_cgraph *sam_build_fast_graph(const sam_model &model,
                                          sam_state &state, int nx, int ny,
-                                         sam_prompt prompt);
+                                         const sam_prompt &prompt,
+                                         bool multimask_output);
 
 std::vector<cv::Mat> sam_get_masks(const sam_hparams &hparams, int nx, int ny,
-                                   const sam_state &state);
+                                   const sam_state &state,
+                                   bool multimask_output);
+
+void to_file(const std::string &fname, const struct ggml_tensor *t);
 
 class sam_predictor {
 public:
@@ -343,12 +349,17 @@ public:
     }
   }
 
-  void encode_image(const cv::Mat &mat0, int n_threads) {
-    nx0 = mat0.cols;
-    ny0 = mat0.rows;
-    const auto mat1 = sam_image_preprocess(mat0);
-    // Encode image
+  /**
+  @param nx0 nx of the original image
+  @param ny0 ny of the original image
+  @param mat1 the preprocessed image. For SAM, use `sam_image_preprocess`. For
+  MedSAM, use `medsam_image_preprocess`
+   */
+  void encode_image(int nx0, int ny0, const cv::Mat &mat1, int n_threads) {
+    this->nx0 = nx0;
+    this->ny0 = ny0;
 
+    // Encode image
     state.buf_compute_img_enc.resize(ggml_tensor_overhead() *
                                          GGML_DEFAULT_GRAPH_SIZE +
                                      ggml_graph_overhead());
@@ -363,15 +374,16 @@ public:
 
     ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
 
-    // print_t_f32("embd_img", state.embd_img);
+    // to_file("embd_img.bin", state.embd_img);
 
     ggml_gallocr_free(state.allocr);
     state.allocr = nullptr;
     state.work_buffer.clear();
   }
 
-  std::vector<cv::Mat> encode_prompts_and_decode_masks(const sam_prompt &prompt,
-                                                       int n_threads) {
+  std::vector<cv::Mat>
+  encode_prompts_and_decode_masks(const sam_prompt &prompt,
+                                  const bool multimask_output, int n_threads) {
     // Encode prompt and decode mask
     {
       state.buf_compute_fast.resize(ggml_tensor_overhead() *
@@ -390,8 +402,8 @@ public:
         break;
       }
 
-      struct ggml_cgraph *gf =
-          sam_build_fast_graph(model, state, nx0, ny0, prompt);
+      struct ggml_cgraph *gf = sam_build_fast_graph(model, state, nx0, ny0,
+                                                    prompt, multimask_output);
       if (gf == nullptr) {
         char buf[128];
         snprintf(buf, 128, "%s: failed to build fast graph\n", __func__);
@@ -400,13 +412,14 @@ public:
 
       ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
 
-      // print_t_f32("iou_predictions", state.iou_predictions);
-      // print_t_f32("low_res_masks", state.low_res_masks);
+      //   to_file("low_res_masks.bin", state.low_res_masks);
+      //   to_file("iou_predictions.bin", state.iou_predictions);
+
       ggml_gallocr_free(state.allocr);
       state.allocr = nullptr;
     }
 
-    return sam_get_masks(model.hparams, nx0, ny0, state);
+    return sam_get_masks(model.hparams, nx0, ny0, state, multimask_output);
   }
   ~sam_predictor() { ggml_free(model.ctx); }
 

@@ -1,13 +1,11 @@
-#include <stdexcept>
 #define _USE_MATH_DEFINES        // for M_PI
 #define _CRT_SECURE_NO_DEPRECATE // Disables ridiculous "unsafe" warnigns on
                                  // Windows
 
+#include "sam.hpp"
 #include "ggml-alloc.h"
-#include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "ggml.h"
-#include "sam.hpp"
 #include <atomic>
 #include <opencv2/core.hpp>
 #include <opencv2/opencv.hpp>
@@ -36,7 +34,7 @@
 //     ggml_build_forward_expand(gf, tmp0);
 // }
 
-void print_t_f32(const char *title, struct ggml_tensor *t, int n = 10) {
+void print_t_f32(const char *title, struct ggml_tensor *t, int n) {
   printf("%s\n", title);
   auto *data = (float *)t->data;
   printf("dims: % " PRId64 " % " PRId64 " % " PRId64 " % " PRId64 " f32\n",
@@ -61,6 +59,14 @@ void print_t_f32(const char *title, struct ggml_tensor *t, int n = 10) {
     sum += data[i];
   }
   printf("sum:  %f\n\n", sum);
+}
+
+void to_file(const std::string &fname, const struct ggml_tensor *t) {
+  std::ofstream of(fname, std::ios::binary);
+  of.write((const char *)t->data,
+           t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3] * sizeof(float));
+  fprintf(stdout, "Saved %s (%d, %d, %d, %d)\n", fname.data(), t->ne[0],
+          t->ne[1], t->ne[2], t->ne[3]);
 }
 
 static void ggml_disconnect_node_from_graph(ggml_tensor *t) {
@@ -134,8 +140,7 @@ cv::Mat sam_image_preprocess(cv::Mat img) {
   img.convertTo(img, CV_32F);
   cv::Scalar pixel_mean{123.675f, 116.280f, 103.530f};
   cv::Scalar pixel_std{58.395f, 57.120f, 57.375f};
-  cv::subtract(img, pixel_mean, img);
-  cv::divide(img, pixel_std, img);
+  img = (img - pixel_mean) / pixel_std;
 
   // Size up
   const auto scale = 1024.0F / std::max(img.cols, img.rows);
@@ -149,6 +154,32 @@ cv::Mat sam_image_preprocess(cv::Mat img) {
   cv::copyMakeBorder(resized, resized, 0, bottom, 0, right,
                      cv::BORDER_CONSTANT);
   return resized;
+}
+
+void to_file(const std::string &fname, const cv::Mat &mat) {
+  std::ofstream fout(fname, std::ios::binary);
+  fout.write((const char *)mat.data, mat.total() * mat.elemSize());
+}
+
+cv::Mat medsam_image_preprocess(cv::Mat img) {
+  // Size up
+  const auto scale = 1024.0F / std::max(img.cols, img.rows);
+  int nx2 = std::round(img.cols * scale);
+  int ny2 = std::round(img.rows * scale);
+
+  cv::resize(img, img, {nx2, ny2}, 0, 0, cv::INTER_CUBIC);
+  int bottom = 1024 - ny2;
+  int right = 1024 - nx2;
+  cv::copyMakeBorder(img, img, 0, bottom, 0, right, cv::BORDER_CONSTANT);
+
+  // Rescale
+  img.convertTo(img, CV_32F);
+  double pixel_min{};
+  double pixel_max{};
+  cv::minMaxLoc(img, &pixel_min, &pixel_max);
+  img = (img - pixel_min) / std::max(pixel_max - pixel_min, 1.0e-8);
+
+  return img;
 }
 
 // load the model's weights from a file
@@ -1325,7 +1356,8 @@ struct ggml_tensor *sam_prompt_encode_pe_encoding(const sam_encoder_prompt &enc,
 prompt_encoder_result sam_encode_prompt(const sam_model &model,
                                         struct ggml_context *ctx0,
                                         struct ggml_cgraph *gf,
-                                        sam_state &state, sam_prompt &prompt) {
+                                        sam_state &state,
+                                        const sam_prompt &prompt) {
 
   const auto &hparams = model.hparams;
   const auto &enc = model.enc_prompt;
@@ -1395,10 +1427,8 @@ prompt_encoder_result sam_encode_prompt(const sam_model &model,
 
   // printf("used_mem = %zu\n", ggml_used_mem(ctx0));
 
-  prompt_encoder_result res;
-  res.embd_prompt_sparse = embd_prompt_sparse;
-  res.embd_prompt_dense = embd_prompt_dense;
-  return res;
+  return prompt_encoder_result{.embd_prompt_sparse = embd_prompt_sparse,
+                               .embd_prompt_dense = embd_prompt_dense};
 }
 
 struct ggml_tensor *sam_decode_mask_transformer_attn(
@@ -1485,7 +1515,8 @@ sam_decode_mask_mlp_relu_3(struct ggml_tensor *in, struct ggml_tensor *w_0,
 bool sam_decode_mask(const sam_model &model,
                      const prompt_encoder_result &prompt,
                      struct ggml_tensor *pe_img, struct ggml_context *ctx0,
-                     struct ggml_cgraph *gf, sam_state &state) {
+                     struct ggml_cgraph *gf, sam_state &state,
+                     const bool multimask_output) {
 
   const auto &hparams = model.hparams;
   const auto &dec = model.dec;
@@ -1748,14 +1779,26 @@ bool sam_decode_mask(const sam_model &model,
   // Select the correct mask or masks for output
   // ref:
   // https://github.com/facebookresearch/segment-anything/blob/6fdee8f2727f4506cfbbe553e23b895e27956588/segment_anything/modeling/mask_decoder.py#L101
-  iou_pred = ggml_cpy(
-      state.ctx,
-      ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]),
-      state.iou_predictions);
-  masks = ggml_view_4d(ctx0, masks, masks->ne[0], masks->ne[1],
-                       masks->ne[2] - 1, masks->ne[3], masks->nb[1],
-                       masks->nb[2], masks->nb[3], masks->nb[2] /* offset*/);
-  masks = ggml_cpy(state.ctx, masks, state.low_res_masks);
+  if (multimask_output) {
+    iou_pred = ggml_cpy(
+        state.ctx,
+        ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]),
+        state.iou_predictions);
+    masks = ggml_view_4d(ctx0, masks, masks->ne[0], masks->ne[1],
+                         masks->ne[2] - 1, masks->ne[3], masks->nb[1],
+                         masks->nb[2], masks->nb[3], masks->nb[2] /* offset*/);
+    masks = ggml_cpy(state.ctx, masks, state.low_res_masks);
+  } else {
+    iou_pred = ggml_cpy(state.ctx, ggml_view_1d(ctx0, iou_pred, 1, 0),
+                        ggml_view_1d(ctx0, state.iou_predictions, 1, 0));
+    masks =
+        ggml_view_4d(ctx0, masks, masks->ne[0], masks->ne[1], 1, masks->ne[3],
+                     masks->nb[1], masks->nb[2], masks->nb[3], 0);
+    auto *low_res_mask =
+        ggml_view_4d(ctx0, state.low_res_masks, masks->ne[0], masks->ne[1], 1,
+                     masks->ne[3], masks->nb[1], masks->nb[2], masks->nb[3], 0);
+    masks = ggml_cpy(state.ctx, masks, low_res_mask);
+  }
 
   ggml_build_forward_expand(gf, masks);
   ggml_build_forward_expand(gf, iou_pred);
@@ -1765,9 +1808,9 @@ bool sam_decode_mask(const sam_model &model,
 
   return true;
 }
-
 std::vector<cv::Mat> sam_get_masks(const sam_hparams &hparams, int nx, int ny,
-                                   const sam_state &state) {
+                                   const sam_state &state,
+                                   const bool multimask_output) {
   if (state.low_res_masks->ne[2] == 0)
     return {};
   if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
@@ -1787,7 +1830,7 @@ std::vector<cv::Mat> sam_get_masks(const sam_hparams &hparams, int nx, int ny,
 
   const int ne0 = state.low_res_masks->ne[0];
   const int ne1 = state.low_res_masks->ne[1];
-  const int ne2 = state.low_res_masks->ne[2];
+  const int ne2 = multimask_output ? state.low_res_masks->ne[2] : 1;
 
   // Remove padding and upscale masks to the original image size.
   // ref:
@@ -1878,8 +1921,9 @@ std::vector<cv::Mat> sam_get_masks(const sam_hparams &hparams, int nx, int ny,
 }
 
 struct ggml_cgraph *sam_build_fast_graph(const sam_model &model,
-                                         sam_state &state, int nx, int ny,
-                                         sam_prompt prompt) {
+                                         sam_state &state, const int nx,
+                                         const int ny, const sam_prompt &prompt,
+                                         const bool multimask_output) {
 
   struct ggml_init_params ggml_params = {
       .mem_size = state.buf_compute_fast.size(),
@@ -1904,7 +1948,8 @@ struct ggml_cgraph *sam_build_fast_graph(const sam_model &model,
     return {};
   }
 
-  if (!sam_decode_mask(model, enc_res, pe_img_dense, ctx0, gf, state)) {
+  if (!sam_decode_mask(model, enc_res, pe_img_dense, ctx0, gf, state,
+                       multimask_output)) {
     fprintf(stderr, "%s: failed to decode mask\n", __func__);
     return {};
   }
@@ -1958,7 +2003,7 @@ struct ggml_cgraph *sam_build_fast_graph(const sam_model &model,
         ggml_graph_get_tensor(gf, "xy_embed_stacked");
     const int32_t n_img_embd = model.hparams.n_img_embd();
     const float n_img_embd_inv = 1.0f / n_img_embd;
-    float *data = (float *)ggml_get_data(xy_embed_stacked);
+    auto *data = (float *)ggml_get_data(xy_embed_stacked);
     for (int i = 0; i < n_img_embd; ++i) {
       const int row = 2 * i * n_img_embd;
       const float y_val = 2 * (i + 0.5f) * n_img_embd_inv - 1;
@@ -2144,10 +2189,11 @@ int sam_main(int argc, char **argv) {
 
   sam_predictor predictor(params);
 
-  predictor.encode_image(mat0, params.n_threads);
+  predictor.encode_image(mat0.cols, mat0.rows, sam_image_preprocess(mat0),
+                         params.n_threads);
 
   const auto masks = predictor.encode_prompts_and_decode_masks(
-      params.prompt, params.n_threads);
+      params.prompt, params.multimask_output, params.n_threads);
 
   for (int i = 0; i < masks.size(); ++i) {
     std::string filename = params.fname_out + std::to_string(i) + ".png";

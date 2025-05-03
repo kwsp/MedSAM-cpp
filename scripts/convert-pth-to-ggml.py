@@ -70,8 +70,6 @@ print(hparams)
 for k, v in model.items():
     print(k, v.shape)
 
-# exit()
-# code.interact(local=locals())
 
 fout = open(fname_out, "wb")
 
@@ -94,9 +92,7 @@ for k, v in model.items():
         "Processing variable: " + name + " with shape: ", shape, " and type: ", v.dtype
     )
 
-    # data = tf.train.load_variable(dir_model, name).squeeze()
-    # data = v.numpy().squeeze()
-    data = v.numpy()
+    data: np.ndarray = v.numpy()
     n_dims = len(data.shape)
 
     # for efficiency - transpose some matrices

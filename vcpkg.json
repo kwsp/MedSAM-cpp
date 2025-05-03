@@ -3,7 +3,6 @@
   "name": "medsam-cpp",
   "version": "0.1",
   "dependencies": [
-    "fmt",
     {
       "name": "opencv",
       "features": ["highgui", "world"]

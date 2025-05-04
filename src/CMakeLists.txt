@@ -10,11 +10,9 @@ set_target_properties(${EXE_NAME} PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
-find_package(fmt CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 
 target_link_libraries(${EXE_NAME} PRIVATE
-  fmt::fmt
   ggml
   opencv_world
 )
